@@ -102,3 +102,93 @@ func (d *DB) InitSchema(schemaSQL string) error {
 	_, err := d.db.Exec(schemaSQL)
 	return err
 }
+
+// GetPostByID получает одну новость по ID
+func (d *DB) GetPostByID(id int) (models.Post, error) {
+	query := `
+		SELECT id, title, content, pub_time, link, source
+		FROM posts
+		WHERE id = $1`
+
+	var post models.Post
+	err := d.db.QueryRow(query, id).Scan(
+		&post.ID, &post.Title, &post.Content,
+		&post.PubTime, &post.Link, &post.Source,
+	)
+	return post, err
+}
+
+// GetPostsPaginated получает новости с пагинацией (без поиска)
+func (d *DB) GetPostsPaginated(perPage, offset int) ([]models.Post, int, error) {
+	// 1. Получаем общее количество новостей
+	var total int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM posts").Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 2. Получаем нужную страницу
+	query := `
+		SELECT id, title, content, pub_time, link, source
+		FROM posts
+		ORDER BY pub_time DESC
+		LIMIT $1 OFFSET $2`
+
+	rows, err := d.db.Query(query, perPage, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var posts []models.Post
+	for rows.Next() {
+		var p models.Post
+		if err := rows.Scan(&p.ID, &p.Title, &p.Content, &p.PubTime, &p.Link, &p.Source); err != nil {
+			return nil, 0, err
+		}
+		posts = append(posts, p)
+	}
+
+	return posts, total, rows.Err()
+}
+
+// GetPostsPaginatedWithSearch получает новости с поиском по названию и пагинацией
+// Использует ILIKE для регистронезависимого поиска
+func (d *DB) GetPostsPaginatedWithSearch(search string, perPage, offset int) ([]models.Post, int, error) {
+	searchPattern := "%" + search + "%"
+
+	// 1. Получаем общее количество новостей с учётом фильтра
+	var total int
+	err := d.db.QueryRow(
+		"SELECT COUNT(*) FROM posts WHERE title ILIKE $1",
+		searchPattern,
+	).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 2. Получаем нужную страницу с фильтром
+	query := `
+		SELECT id, title, content, pub_time, link, source
+		FROM posts
+		WHERE title ILIKE $1
+		ORDER BY pub_time DESC
+		LIMIT $2 OFFSET $3`
+
+	rows, err := d.db.Query(query, searchPattern, perPage, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var posts []models.Post
+	for rows.Next() {
+		var p models.Post
+		if err := rows.Scan(&p.ID, &p.Title, &p.Content, &p.PubTime, &p.Link, &p.Source); err != nil {
+			return nil, 0, err
+		}
+		posts = append(posts, p)
+	}
+
+	return posts, total, rows.Err()
+}
