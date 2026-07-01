@@ -1,4 +1,3 @@
-// Package database предоставляет функции для работы с базой данных PostgreSQL
 package database
 
 import (
@@ -7,59 +6,48 @@ import (
 
 	"gonews/pkg/models"
 
-	_ "github.com/lib/pq"
+	_ "modernc.org/sqlite"
 )
 
-// DB обертка над sql.DB для удобной работы с базой данных
 type DB struct {
 	db *sql.DB
 }
 
-// Config конфигурация подключения к базе данных
+// Config для SQLite упрощён — нужен только путь к файлу
 type Config struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	DBName   string
-	SSLMode  string
+	Path string // например, "./gonews.db"
 }
 
-// NewDB создает новое подключение к базе данных по конфигурации
 func NewDB(cfg Config) (*DB, error) {
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode)
+	if cfg.Path == "" {
+		cfg.Path = "gonews.db"
+	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := sql.Open("sqlite", cfg.Path)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка подключения к БД: %w", err)
+		return nil, fmt.Errorf("ошибка открытия БД: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("ошибка проверки подключения к БД: %w", err)
+		return nil, fmt.Errorf("ошибка проверки подключения: %w", err)
 	}
 
 	return &DB{db: db}, nil
 }
 
-// Close закрывает подключение к базе данных
 func (d *DB) Close() error {
 	return d.db.Close()
 }
 
-// SavePost сохраняет одну публикацию в базе данных
-// При конфликте по полю link (уникальный) запись пропускается
 func (d *DB) SavePost(post models.Post) error {
 	query := `
 		INSERT INTO posts (title, content, pub_time, link, source)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (link) DO NOTHING`
-
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(link) DO NOTHING`
 	_, err := d.db.Exec(query, post.Title, post.Content, post.PubTime, post.Link, post.Source)
 	return err
 }
 
-// SavePosts сохраняет несколько публикаций, возвращает количество успешно сохранённых
 func (d *DB) SavePosts(posts []models.Post) (int, error) {
 	saved := 0
 	for _, post := range posts {
@@ -70,13 +58,12 @@ func (d *DB) SavePosts(posts []models.Post) (int, error) {
 	return saved, nil
 }
 
-// GetPosts получает последние n публикаций из базы данных, отсортированные по дате
 func (d *DB) GetPosts(n int) ([]models.Post, error) {
 	query := `
 		SELECT id, title, content, pub_time, link, source
 		FROM posts
 		ORDER BY pub_time DESC
-		LIMIT $1`
+		LIMIT ?`
 
 	rows, err := d.db.Query(query, n)
 	if err != nil {
@@ -93,23 +80,14 @@ func (d *DB) GetPosts(n int) ([]models.Post, error) {
 		}
 		posts = append(posts, p)
 	}
-
 	return posts, rows.Err()
 }
 
-// InitSchema инициализирует схему базы данных, выполняя переданный SQL-скрипт
-func (d *DB) InitSchema(schemaSQL string) error {
-	_, err := d.db.Exec(schemaSQL)
-	return err
-}
-
-// GetPostByID получает одну новость по ID
+// НОВОЕ: получение новости по ID
 func (d *DB) GetPostByID(id int) (models.Post, error) {
 	query := `
 		SELECT id, title, content, pub_time, link, source
-		FROM posts
-		WHERE id = $1`
-
+		FROM posts WHERE id = ?`
 	var post models.Post
 	err := d.db.QueryRow(query, id).Scan(
 		&post.ID, &post.Title, &post.Content,
@@ -118,22 +96,17 @@ func (d *DB) GetPostByID(id int) (models.Post, error) {
 	return post, err
 }
 
-// GetPostsPaginated получает новости с пагинацией (без поиска)
+// НОВОЕ: пагинация без поиска
 func (d *DB) GetPostsPaginated(perPage, offset int) ([]models.Post, int, error) {
-	// 1. Получаем общее количество новостей
 	var total int
 	err := d.db.QueryRow("SELECT COUNT(*) FROM posts").Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// 2. Получаем нужную страницу
 	query := `
 		SELECT id, title, content, pub_time, link, source
-		FROM posts
-		ORDER BY pub_time DESC
-		LIMIT $1 OFFSET $2`
-
+		FROM posts ORDER BY pub_time DESC LIMIT ? OFFSET ?`
 	rows, err := d.db.Query(query, perPage, offset)
 	if err != nil {
 		return nil, 0, err
@@ -148,33 +121,26 @@ func (d *DB) GetPostsPaginated(perPage, offset int) ([]models.Post, int, error) 
 		}
 		posts = append(posts, p)
 	}
-
 	return posts, total, rows.Err()
 }
 
-// GetPostsPaginatedWithSearch получает новости с поиском по названию и пагинацией
-// Использует ILIKE для регистронезависимого поиска
+// НОВОЕ: поиск по названию + пагинация (LIKE вместо ILIKE, регистр обрабатываем руками)
 func (d *DB) GetPostsPaginatedWithSearch(search string, perPage, offset int) ([]models.Post, int, error) {
 	searchPattern := "%" + search + "%"
 
-	// 1. Получаем общее количество новостей с учётом фильтра
 	var total int
 	err := d.db.QueryRow(
-		"SELECT COUNT(*) FROM posts WHERE title ILIKE $1",
+		"SELECT COUNT(*) FROM posts WHERE LOWER(title) LIKE LOWER(?)",
 		searchPattern,
 	).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// 2. Получаем нужную страницу с фильтром
 	query := `
 		SELECT id, title, content, pub_time, link, source
-		FROM posts
-		WHERE title ILIKE $1
-		ORDER BY pub_time DESC
-		LIMIT $2 OFFSET $3`
-
+		FROM posts WHERE LOWER(title) LIKE LOWER(?)
+		ORDER BY pub_time DESC LIMIT ? OFFSET ?`
 	rows, err := d.db.Query(query, searchPattern, perPage, offset)
 	if err != nil {
 		return nil, 0, err
@@ -189,6 +155,10 @@ func (d *DB) GetPostsPaginatedWithSearch(search string, perPage, offset int) ([]
 		}
 		posts = append(posts, p)
 	}
-
 	return posts, total, rows.Err()
+}
+
+func (d *DB) InitSchema(schemaSQL string) error {
+	_, err := d.db.Exec(schemaSQL)
+	return err
 }
